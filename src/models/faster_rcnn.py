@@ -98,7 +98,25 @@ def build_faster_rcnn(
     #    - config parameters for detection thresholds
     # 4. Replace the box predictor head for the correct number of classes
     # 5. Return the assembled model
-    raise NotImplementedError("build_faster_rcnn() not implemented")
+    
+    config = config if config else DetectorConfig()
+    kwargs = config.to_kwargs()
+
+    num_anchors = anchor_generator.num_anchors_per_location()[0]
+    rpn_head = rpn_head_factory(num_anchors)
+
+    model = FasterRCNN(
+        backbone=backbone.body,
+        num_classes=num_classes,
+        rpn_anchor_generator=anchor_generator,
+        rpn_head=rpn_head,
+        box_roi_pool=roi_pool,
+        **kwargs,
+    )
+
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
     # =========================================================
 
 

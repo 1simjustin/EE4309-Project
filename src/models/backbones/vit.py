@@ -79,7 +79,10 @@ class PatchEmbed(nn.Module):
         # 1. Use self.proj (conv2d) to project patches to embedding dimension
         # 2. Permute from (B, C, H, W) to (B, H, W, C) format for transformer
         # This is the crucial first step of ViT that converts images to tokens
-        raise NotImplementedError("PatchEmbed.forward() not implemented")
+        
+        x = self.proj(x)
+        x = x.permute(0, 2, 3, 1)
+        return x
         # ===================================================
 
 
@@ -157,7 +160,29 @@ class Attention(nn.Module):
         # 5. Apply softmax to get attention weights
         # 6. Apply attention to values: Attention @ V
         # 7. Reshape and apply output projection
-        raise NotImplementedError("Attention.forward() not implemented")
+        
+        # Get input dimensions
+        B, H, W, C = x.shape
+
+        # Apply QKV linear transformation and reshape
+        qkv = self.qkv(x).reshape(B, H, W, 3, self.num_heads, C // self.num_heads).permute(3, 0, 4, 1, 2, 5)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # Compute attention scores
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Add relative position embeddings
+        q = q.transpose(1, 2).reshape(B, H * W, C)
+        attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+
+        # Apply softmax to get attention weights
+        attn = attn.softmax(dim=-1)
+
+        # Apply attention to values
+        out = (attn @ v).transpose(1, 2).reshape(B, H, W, C)
+        out = self.proj(out)
+
+        return out
         # ==========================================================
 
 
@@ -229,7 +254,23 @@ class Block(nn.Module):
         # 4. Apply second layer norm and MLP
         # 5. Add second skip connection with dropout path
         # Remember to handle window partitioning when window_size > 0
-        raise NotImplementedError("Block.forward() not implemented")
+        
+        # Store shortcut and normalize
+        shortcut = x
+        x = self.norm1(x)
+
+        # Apply attention (windowed if specified)
+        if self.window_size > 0:
+            windows, (Hp, Wp) = window_partition(x, self.window_size)
+            attn_windows = self.attn(windows)
+            out = window_unpartition(attn_windows, self.window_size, (Hp, Wp), (x.shape[1], x.shape[2]))
+        else:
+            out = self.attn(x)
+
+        # Skip connection
+        out = shortcut + self.drop_path(out)
+        out = out + self.drop_path(self.mlp(self.norm2(out)))
+        return out
         # ==========================================================
 
 
@@ -243,7 +284,29 @@ def get_abs_pos(abs_pos: torch.Tensor, hw: Tuple[int, int], has_cls_token: bool 
     # 4. If size mismatch, use F.interpolate to resize embeddings
     # 5. Return reshaped positional embeddings in (1, H, W, C) format
     # This allows ViT to handle different input sizes than pretraining
-    raise NotImplementedError("get_abs_pos() not implemented")
+    
+    H, W = hw
+    N, L, C = abs_pos.shape
+
+    if has_cls_token:
+        cls_token = abs_pos[:, 0:1, :]
+        abs_pos = abs_pos[:, 1:, :]
+    else:
+        cls_token = None
+        grid_pos = abs_pos
+    
+    size_orig = int(math.sqrt(L))
+    if (H, W) != (size_orig, size_orig):
+        abs_pos = abs_pos.transpose(1, 2).reshape(N, C, size_orig, size_orig)
+        abs_pos = F.interpolate(abs_pos, size=(H, W), mode="bicubic", align_corners=False)
+        abs_pos = abs_pos.flatten(2).transpose(1, 2)
+
+    if has_cls_token:
+        abs_pos = torch.cat((cls_token, abs_pos), dim=1)
+    else:
+        abs_pos = abs_pos.reshape(N, H, W, C)
+    
+    return abs_pos
     # ==============================================================
 
 
@@ -332,7 +395,17 @@ class ViT(nn.Module):
         # 3. Pass through all transformer blocks sequentially
         # 4. Return output in the expected format (permute to BCHW)
         # Note: Output should be a dict with the feature name as key
-        raise NotImplementedError("ViT.forward() not implemented")
+        
+        x = self.patch_embed(x)
+        B, H, W, C = x.shape
+        pos_embed = get_abs_pos(self.pos_embed, (H, W), has_cls_token=False)
+        x = x + pos_embed.to(x.device)
+
+        for block in self.blocks:
+            x = block(x)
+
+        x = x.permute(0, 3, 1, 2)
+        return {self._out_features[0]: x}
         # ========================================================
 
     def output_shape(self) -> dict[str, ShapeSpec]:
@@ -470,7 +543,26 @@ class SimpleFeaturePyramid(nn.Module):
         # 4. Handle top_block if present for additional pyramid levels
         # 5. Return dictionary mapping feature names to tensors
         # This creates the multi-scale features needed for detection
-        raise NotImplementedError("SimpleFeaturePyramid.forward() not implemented")
+        
+        outs = self.net(x)
+        x = outs[self.in_feature]
+        features = {}
+
+        for idx, stage in enumerate(self.stages):
+            out = stage(x)
+            key = self._out_features[idx]
+            features[key] = out
+
+        if self.top_block is not None:
+            last_stride = self._out_features[len(self.stages) - 1]
+            last_feat = features[last_stride]
+            top_feats = self.top_block(last_feat)
+
+            for i, t in enumerate(top_feats):
+                key = self._out_features[len(self.stages) + i]
+                features[key] = t
+        
+        return features
         # ============================================================
 
 

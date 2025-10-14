@@ -64,7 +64,25 @@ class Bottleneck(nn.Module):
         # 4. Add skip connection (identity or downsample if needed)
         # 5. Apply final ReLU activation
         # Remember to handle the downsample path when stride > 1
-        raise NotImplementedError("Bottleneck.forward() not implemented")
+        
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if hasattr(self, "downsample"):
+            identity = self.downsample(x)
+        out += identity
+        out = self.relu(out)
+        return out
         # =============================================================
 
 
@@ -115,7 +133,21 @@ class ResNet(nn.Module):
         # 3. Apply global average pooling and flatten
         # 4. Apply final fully connected layer
         # This should match the torchvision ResNet-50 structure
-        raise NotImplementedError("ResNet.forward() not implemented")
+        
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
         # ========================================================
 
 
@@ -146,7 +178,10 @@ class BackboneWithFPN(nn.Module):
         # 2. Pass features through FPN (self.fpn) to create feature pyramid
         # 3. Return the FPN output (OrderedDict of multi-scale features)
         # This creates the feature pyramid needed for multi-scale detection
-        raise NotImplementedError("BackboneWithFPN.forward() not implemented")
+        
+        x = self.body(x)
+        x = self.fpn(x)
+        return x
         # =================================================================
 
 
@@ -200,7 +235,35 @@ def build_resnet50_fpn_backbone(config: Optional[ResNetBackboneConfig] = None) -
     #    (hint: use backbone.fc.in_features to determine channel progression)
     # 4. Create and return BackboneWithFPN with all components
     # This integrates ResNet feature extraction with FPN multi-scale features
-    raise NotImplementedError("build_resnet50_fpn_backbone() not implemented")
+    
+    if config is None:
+        config = ResNetBackboneConfig()
+    
+    backbone = ResNet()
+    _load_pretrained_weights(backbone, config)
+    _freeze_backbone_layers(backbone, config.trainable_layers)
+
+    return_layers = {
+        "layer1": "0",
+        "layer2": "1",
+        "layer3": "2",
+        "layer4": "3",
+    }
+
+    in_channels_list = [
+        256,
+        512,
+        1024,
+        2048
+    ]
+
+    backbone_with_fpn = BackboneWithFPN(
+        backbone=backbone,
+        return_layers=return_layers,
+        in_channels_list=in_channels_list,
+        out_channels=config.out_channels
+    )
+    return backbone_with_fpn
     # ===================================================================
 
 

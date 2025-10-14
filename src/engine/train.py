@@ -127,7 +127,21 @@ def main():
             # 3. Sum all losses from the loss dictionary
             # 4. Backward pass: scale losses, compute gradients, step optimizer
             # 5. Update scaler for mixed precision training
-            raise NotImplementedError("Training step not implemented")
+            
+            images = [img.to(device) for img in images]
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            optim.zero_grad()
+
+            with autocast(enabled=use_amp):
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
+
+            scaler.scale(losses).backward()
+            scaler.step(optim)
+            scaler.update()
+
+            loss_sum += losses.item()
+            pbar.set_postfix(loss=f"{losses.item():.3f}")
             # ==================================================
 
             loss_sum += losses.item()
@@ -148,7 +162,20 @@ def main():
         # 4. Compute final mAP and extract the "map" value
         # Handle exceptions gracefully and set map50 = -1.0 if evaluation fails
         try:
-            raise NotImplementedError("mAP evaluation not implemented")
+            from torchmetrics.detection.mean_ap import MeanAveragePrecision
+            model.eval()
+            metric = MeanAveragePrecision(iou_type="bbox", iou_thresholds=[0.5], class_metrics=False).to(device)
+
+            with torch.no_grad():
+                for images, targets in tqdm(val_loader, ncols=100, desc=f"val[{epoch}/{args.epochs}]"):
+                    images = [img.to(device) for img in images]
+                    targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+                    preds = model(images)
+                    metric.update(preds, targets)
+
+            results = metric.compute()
+            map50 = float(results["map"]).item() if "map_50" in results else results["map"].item()
         except Exception as e:
             print("Eval skipped due to:", e)
             map50 = -1.0
