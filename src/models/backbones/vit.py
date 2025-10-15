@@ -273,7 +273,7 @@ class Block(nn.Module):
         if self.window_size > 0:
             windows, padding = window_partition(x, self.window_size)
             attn_windows = self.attn(windows)
-            out = window_unpartition(attn_windows, self.window_size, padding, x.shape[1], x.shape[2])
+            out = window_unpartition(attn_windows, self.window_size, padding, (x.shape[1], x.shape[2]))
         else:
             out = self.attn(x)
 
