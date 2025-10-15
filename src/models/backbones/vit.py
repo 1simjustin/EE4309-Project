@@ -570,18 +570,17 @@ class SimpleFeaturePyramid(nn.Module):
         features = bottom_up_features[self.in_feature]
 
         # Apply each FPN stage to create multi-scale features
-        results = {}
-        for name, stage in zip(self._out_features, self.stages):
-            results[name] = stage(features)
+        results = [stage(features) for stage in self.stages]
 
         # Handle top_block if present
         if self.top_block is not None:
-            top_results = self.top_block(results[self._out_features[-1]])
-            if isinstance(top_results, tuple):
-                for i, res in enumerate(top_results, 1):
-                    results[f"p{int(self._out_features[-1][1:]) + i}"] = res
-        
-        return results
+            last_feature = results[-1]
+            top_block_features = self.top_block(last_feature)
+            results.extend(top_block_features)
+
+        out = {name : res for name, res in zip(self._out_features, results)}
+
+        return out
         # ============================================================
 
 
