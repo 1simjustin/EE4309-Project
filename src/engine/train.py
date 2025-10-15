@@ -139,9 +139,6 @@ def main():
             scaler.scale(losses).backward()
             scaler.step(optim)
             scaler.update()
-
-            loss_sum += losses.item()
-            pbar.set_postfix(loss=f"{losses.item():.3f}")
             # ==================================================
 
             loss_sum += losses.item()
@@ -163,11 +160,11 @@ def main():
         # Handle exceptions gracefully and set map50 = -1.0 if evaluation fails
         try:
             from torchmetrics.detection.mean_ap import MeanAveragePrecision
-            model.eval()
             metric = MeanAveragePrecision(iou_type="bbox", iou_thresholds=[0.5], class_metrics=False).to(device)
+            model.eval()
 
             with torch.no_grad():
-                for images, targets in tqdm(val_loader, ncols=100, desc=f"val[{epoch}/{args.epochs}]"):
+                for images, targets in tqdm(val_loader, desc=f"val[{epoch}/{args.epochs}]"):
                     images = [img.to(device) for img in images]
                     targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
@@ -175,7 +172,7 @@ def main():
                     metric.update(preds, targets)
 
             results = metric.compute()
-            map50 = float(results["map"]).item() if "map_50" in results else results["map"].item()
+            map50 = results["map_50"].item()
         except Exception as e:
             print("Eval skipped due to:", e)
             map50 = -1.0

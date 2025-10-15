@@ -80,7 +80,10 @@ class PatchEmbed(nn.Module):
         # 2. Permute from (B, C, H, W) to (B, H, W, C) format for transformer
         # This is the crucial first step of ViT that converts images to tokens
         
+        # Apply convolutional projection
         x = self.proj(x)
+
+        # Permute to (B, H, W, C)
         x = x.permute(0, 2, 3, 1)
         return x
         # ===================================================
@@ -164,22 +167,29 @@ class Attention(nn.Module):
         # Get input dimensions
         B, H, W, C = x.shape
 
-        # Apply QKV linear transformation and reshape
-        qkv = self.qkv(x).reshape(B, H, W, 3, self.num_heads, C // self.num_heads).permute(3, 0, 4, 1, 2, 5)
+        # Apply QKV linear transformation
+        qkv = self.qkv(x)
+        qkv = qkv.reshape(B, H*W, 3, self.num_heads, C // self.num_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # Compute attention scores
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
         # Add relative position embeddings
-        q = q.transpose(1, 2).reshape(B, H * W, C)
-        attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+        attn = attn.reshape(B*self.num_heads, H*W, H*W)
+        q_rel = q.reshape(B*self.num_heads, H*W, C // self.num_heads)
+        attn = add_decomposed_rel_pos(attn, q_rel, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+        attn = attn.reshape(B, self.num_heads, H*W, H*W)
 
         # Apply softmax to get attention weights
         attn = attn.softmax(dim=-1)
 
         # Apply attention to values
-        out = (attn @ v).transpose(1, 2).reshape(B, H, W, C)
+        out = attn @ v
+
+        # Reshape and apply output projection
+        out = out.transpose(1, 2).reshape(B, H, W, C)
         out = self.proj(out)
 
         return out
@@ -261,15 +271,21 @@ class Block(nn.Module):
 
         # Apply attention (windowed if specified)
         if self.window_size > 0:
-            windows, (Hp, Wp) = window_partition(x, self.window_size)
+            windows, padding = window_partition(x, self.window_size)
             attn_windows = self.attn(windows)
-            out = window_unpartition(attn_windows, self.window_size, (Hp, Wp), (x.shape[1], x.shape[2]))
+            out = window_unpartition(attn_windows, self.window_size, padding, x.shape[1], x.shape[2])
         else:
             out = self.attn(x)
 
-        # Skip connection
+        # Add skip connection with dropout path
         out = shortcut + self.drop_path(out)
-        out = out + self.drop_path(self.mlp(self.norm2(out)))
+
+        # Apply second layer norm and MLP
+        x = self.norm2(out)
+        x = self.mlp(x)
+
+        # Add second skip connection with dropout path
+        out = out + self.drop_path(x)
         return out
         # ==========================================================
 
@@ -285,28 +301,26 @@ def get_abs_pos(abs_pos: torch.Tensor, hw: Tuple[int, int], has_cls_token: bool 
     # 5. Return reshaped positional embeddings in (1, H, W, C) format
     # This allows ViT to handle different input sizes than pretraining
     
+    # Extract height and width
     H, W = hw
-    N, L, C = abs_pos.shape
-
+    
+    # Handle class token
     if has_cls_token:
-        cls_token = abs_pos[:, 0:1, :]
         abs_pos = abs_pos[:, 1:, :]
-    else:
-        cls_token = None
-        grid_pos = abs_pos
-    
-    size_orig = int(math.sqrt(L))
-    if (H, W) != (size_orig, size_orig):
-        abs_pos = abs_pos.transpose(1, 2).reshape(N, C, size_orig, size_orig)
-        abs_pos = F.interpolate(abs_pos, size=(H, W), mode="bicubic", align_corners=False)
-        abs_pos = abs_pos.flatten(2).transpose(1, 2)
 
-    if has_cls_token:
-        abs_pos = torch.cat((cls_token, abs_pos), dim=1)
-    else:
-        abs_pos = abs_pos.reshape(N, H, W, C)
-    
-    return abs_pos
+    n_patches, C = abs_pos.shape[1], abs_pos.shape[2]
+
+    # Determine original grid size
+    orig_size = int(math.sqrt(n_patches))
+
+    # Resize if needed
+    if (H, W) != (orig_size,)*2:
+        pos_embed = abs_pos.reshape(1, orig_size, orig_size, C).permute(0, 3, 1, 2)
+        pos_embed = F.interpolate(pos_embed, size=(H, W), mode="bicubic", align_corners=False)
+        abs_pos = pos_embed.permute(0, 2, 3, 1)
+
+    # Return reshaped positional embeddings
+    return abs_pos.reshape(1, H, W, C)
     # ==============================================================
 
 
@@ -396,15 +410,20 @@ class ViT(nn.Module):
         # 4. Return output in the expected format (permute to BCHW)
         # Note: Output should be a dict with the feature name as key
         
+        # Apply patch embedding
         x = self.patch_embed(x)
         B, H, W, C = x.shape
-        pos_embed = get_abs_pos(self.pos_embed, (H, W), has_cls_token=False)
+
+        # Get and add positional embeddings
+        pos_embed = get_abs_pos(self.pos_embed, (H, W))
         x = x + pos_embed.to(x.device)
 
+        # Pass through transformer blocks
         for block in self.blocks:
             x = block(x)
 
-        x = x.permute(0, 3, 1, 2)
+        # Return output in expected format
+        x = x.permute(0, 3, 1, 2).contiguous()
         return {self._out_features[0]: x}
         # ========================================================
 
@@ -544,25 +563,25 @@ class SimpleFeaturePyramid(nn.Module):
         # 5. Return dictionary mapping feature names to tensors
         # This creates the multi-scale features needed for detection
         
-        outs = self.net(x)
-        x = outs[self.in_feature]
-        features = {}
+        # Get bottom-up features from ViT backbone
+        bottom_up_features = self.net(x)
 
-        for idx, stage in enumerate(self.stages):
-            out = stage(x)
-            key = self._out_features[idx]
-            features[key] = out
+        # Extract the main feature
+        features = bottom_up_features[self.in_feature]
 
+        # Apply each FPN stage to create multi-scale features
+        results = {}
+        for name, stage in zip(self._out_features, self.stages):
+            results[name] = stage(features)
+
+        # Handle top_block if present
         if self.top_block is not None:
-            last_stride = self._out_features[len(self.stages) - 1]
-            last_feat = features[last_stride]
-            top_feats = self.top_block(last_feat)
-
-            for i, t in enumerate(top_feats):
-                key = self._out_features[len(self.stages) + i]
-                features[key] = t
+            top_results = self.top_block(results[self._out_features[-1]])
+            if isinstance(top_results, tuple):
+                for i, res in enumerate(top_results, 1):
+                    results[f"p{int(self._out_features[-1][1:]) + i}"] = res
         
-        return features
+        return results
         # ============================================================
 
 
