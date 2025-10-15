@@ -128,14 +128,17 @@ def main():
             # 4. Backward pass: scale losses, compute gradients, step optimizer
             # 5. Update scaler for mixed precision training
             
+            # Load images and targets to device, reset gradients
             images = [img.to(device) for img in images]
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             optim.zero_grad()
 
+            # Autocast context for mixed precision
             with autocast(enabled=use_amp):
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
 
+            # Sum losses, perform backward pass and update scaler
             scaler.scale(losses).backward()
             scaler.step(optim)
             scaler.update()
@@ -158,23 +161,34 @@ def main():
         #    - Update metric with predictions and ground truth targets
         # 4. Compute final mAP and extract the "map" value
         # Handle exceptions gracefully and set map50 = -1.0 if evaluation fails
+
+        # Import MeanAveragePrecision
+        from torchmetrics.detection.mean_ap import MeanAveragePrecision
+
         try:
-            from torchmetrics.detection.mean_ap import MeanAveragePrecision
+            # Initialise model and set model to eval mode
             metric = MeanAveragePrecision(iou_type="bbox", iou_thresholds=[0.5], class_metrics=False).to(device)
             model.eval()
 
             with torch.no_grad():
+                # Iterate through validation data
                 for images, targets in tqdm(val_loader, desc=f"val[{epoch}/{args.epochs}]"):
+                    # Move images and targets to device
                     images = [img.to(device) for img in images]
                     targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
+                    # Get model predictions
                     preds = model(images)
+                    # Update metric with predictions and targets
                     metric.update(preds, targets)
 
+            # Compute final mAP and extract map@0.5
             results = metric.compute()
             map50 = results["map_50"].item()
+        
         except Exception as e:
-            print("Eval skipped due to:", e)
+            # Handle exceptions gracefully
+            print(f"mAP evaluation failed: {e}")
             map50 = -1.0
         # ===================================================
 

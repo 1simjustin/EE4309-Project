@@ -65,21 +65,28 @@ class Bottleneck(nn.Module):
         # 5. Apply final ReLU activation
         # Remember to handle the downsample path when stride > 1
         
+        # Save shortcut
         identity = x
 
+        # First conv block
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
 
+        # Second conv block
         out = self.conv2(out)
         out = self.bn2(out)
         out = self.relu(out)
 
+        # Third conv block
         out = self.conv3(out)
         out = self.bn3(out)
 
+        # Downsample if needed        
         if hasattr(self, "downsample"):
             identity = self.downsample(x)
+
+        # Add skip connection
         out += identity
         out = self.relu(out)
         return out
@@ -134,16 +141,19 @@ class ResNet(nn.Module):
         # 4. Apply final fully connected layer
         # This should match the torchvision ResNet-50 structure
         
+        # Initial conv block
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
         x = self.maxpool(x)
 
+        # ResNet layers
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
 
+        # Pooling and final FC
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.fc(x)
@@ -179,9 +189,14 @@ class BackboneWithFPN(nn.Module):
         # 3. Return the FPN output (OrderedDict of multi-scale features)
         # This creates the feature pyramid needed for multi-scale detection
         
-        x = self.body(x)
-        x = self.fpn(x)
-        return x
+        # Extract features from backbone
+        features = self.body(x)
+
+        # Build feature pyramid
+        features = self.fpn(features)
+
+        # Return feature maps
+        return features
         # =================================================================
 
 
@@ -239,10 +254,12 @@ def build_resnet50_fpn_backbone(config: Optional[ResNetBackboneConfig] = None) -
     if config is None:
         config = ResNetBackboneConfig()
     
+    # Instantiate ResNet and handle weights
     backbone = ResNet()
     _load_pretrained_weights(backbone, config)
     _freeze_backbone_layers(backbone, config.trainable_layers)
 
+    # Define layers to extract for FPN
     return_layers = {
         "layer1": "0",
         "layer2": "1",
@@ -250,6 +267,7 @@ def build_resnet50_fpn_backbone(config: Optional[ResNetBackboneConfig] = None) -
         "layer4": "3",
     }
 
+    # Calculate in_channels_list based on ResNet architecture
     in_channels_list = [
         256,
         512,
@@ -257,6 +275,7 @@ def build_resnet50_fpn_backbone(config: Optional[ResNetBackboneConfig] = None) -
         2048
     ]
 
+    # Create BackboneWithFPN
     backbone_with_fpn = BackboneWithFPN(
         backbone=backbone,
         return_layers=return_layers,

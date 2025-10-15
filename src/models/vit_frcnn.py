@@ -49,14 +49,18 @@ def get_vit_fasterrcnn_model(
     # 5. Assemble final detector using build_faster_rcnn
     # This combines ViT features with Faster R-CNN detection framework
 
+    # Build ViT+FPN backbone
     backbone = build_vit_fpn_backbone(backbone_config)
     feat_names = list(backbone._out_features)
+
+    # Wrap in BackboneBundle
     backbone_bundle = BackboneBundle(
         body=backbone,
         featmap_names=feat_names,
         out_channels=backbone.out_channels,
     )
 
+    # Create anchor generator, RPN head factory, and ROI pooler
     anchor_generator = AnchorGenerator(
         sizes=DEFAULT_ANCHOR_SIZES,
         aspect_ratios=DEFAULT_ASPECT_RATIOS,
@@ -67,6 +71,8 @@ def get_vit_fasterrcnn_model(
         output_size=7,
         sampling_ratio=2,
     )
+
+    # Configure detection parameters
     detector_cfg = DetectorConfig(
         box_score_thresh=box_score_thresh,
         box_nms_thresh=box_nms_thresh,
@@ -79,6 +85,7 @@ def get_vit_fasterrcnn_model(
         rpn_score_thresh=rpn_score_thresh,
     )
 
+    # Assemble final detector
     model = build_faster_rcnn(
         backbone=backbone_bundle,
         anchor_generator=anchor_generator,
@@ -87,5 +94,6 @@ def get_vit_fasterrcnn_model(
         num_classes=num_classes,
         config=detector_cfg,
     )
+    
     return model
     # ================================================================

@@ -99,12 +99,15 @@ def build_faster_rcnn(
     # 4. Replace the box predictor head for the correct number of classes
     # 5. Return the assembled model
     
+    # Get configuration
     config = config if config else DetectorConfig()
     kwargs = config.to_kwargs()
 
+    # Create RPN head
     num_anchors = anchor_generator.num_anchors_per_location()[0]
     rpn_head = rpn_head_factory(num_anchors)
 
+    # Assemble Faster R-CNN model
     model = FasterRCNN(
         backbone=backbone.body,
         num_classes=num_classes,
@@ -114,8 +117,11 @@ def build_faster_rcnn(
         **kwargs,
     )
 
+    # Replace box predictor for correct number of classes
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    
+    # Return model
     return model
     # =========================================================
 
