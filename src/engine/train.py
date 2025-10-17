@@ -4,18 +4,24 @@ from pathlib import Path
 from typing import Dict
 import torch
 from torch.utils.data import DataLoader
-from torch.optim import SGD
-from torch.optim.lr_scheduler import StepLR
+from torch.optim import SGD, AdamW
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 
-
+# Import MeanAveragePrecision for mAP evaluation
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+# Import necessary torchvision transforms
+from torchvision import transforms
 
 from src.datasets.voc import VOCDataset, collate_fn
 from src.utils.transforms import Compose, ToTensor, RandomHorizontalFlip
 from src.models import build_model, AVAILABLE_MODELS
 from src.utils.common import seed_everything, save_jsonl
 
+
+# HYPERPARAMETERS
+ACCUMULATE_STEPS = 1  # Gradient accumulation steps
 
 def get_args():
     ap = argparse.ArgumentParser()
@@ -44,7 +50,11 @@ def main():
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_tf = Compose([RandomHorizontalFlip(0.5), ToTensor()])
+    train_tf = Compose([
+        RandomHorizontalFlip(0.5),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        ToTensor(),
+        ])
     val_tf = Compose([ToTensor()])
 
     # If both use trainval dataset, split it into train and val
@@ -102,9 +112,12 @@ def main():
     model.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
-    optim = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
 
-    sched = StepLR(optim, step_size=6, gamma=0.1)
+    # Setup optimizer and scheduler
+    # optim = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    # sched = StepLR(optim, step_size=6, gamma=0.1)
+    optim = AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    sched = CosineAnnealingLR(optim, T_max=args.epochs, eta_min=1e-6)
 
     # Only enable AMP if CUDA is available and not explicitly disabled
     use_amp = not args.no_amp and device.type == "cuda"
@@ -119,6 +132,9 @@ def main():
         pbar = tqdm(train_loader, ncols=100, desc=f"train[{epoch}/{args.epochs}]")
         loss_sum = 0.0
 
+        # Initially reset optimizer gradients
+        optim.zero_grad()
+
         for images, targets in pbar:
             # ===== STUDENT TODO: Implement training step =====
             # Hint: Complete the training loop:
@@ -128,10 +144,9 @@ def main():
             # 4. Backward pass: scale losses, compute gradients, step optimizer
             # 5. Update scaler for mixed precision training
             
-            # Load images and targets to device, reset gradients
+            # Load images and targets to device
             images = [img.to(device) for img in images]
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-            optim.zero_grad()
 
             # Autocast context for mixed precision
             with autocast(enabled=use_amp):
@@ -140,8 +155,12 @@ def main():
 
             # Sum losses, perform backward pass and update scaler
             scaler.scale(losses).backward()
-            scaler.step(optim)
-            scaler.update()
+
+            # Perform Gradient Accumulation
+            if (pbar.n + 1) % ACCUMULATE_STEPS == 0:
+                scaler.step(optim)
+                scaler.update()
+                optim.zero_grad()
             # ==================================================
 
             loss_sum += losses.item()
@@ -162,9 +181,7 @@ def main():
         # 4. Compute final mAP and extract the "map" value
         # Handle exceptions gracefully and set map50 = -1.0 if evaluation fails
 
-        # Import MeanAveragePrecision
-        from torchmetrics.detection.mean_ap import MeanAveragePrecision
-
+        # MeanAveragePrecision is imported at the top of the file
         try:
             # Initialise model and set model to eval mode
             metric = MeanAveragePrecision(iou_type="bbox", iou_thresholds=[0.5], class_metrics=False).to(device)
