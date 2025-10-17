@@ -254,7 +254,7 @@ def build_resnet50_fpn_backbone(config: Optional[ResNetBackboneConfig] = None) -
     if config is None:
         config = ResNetBackboneConfig()
     
-    # Instantiate ResNet and handle weights
+    # Instantiate ResNet and handle weights/freezing
     backbone = ResNet()
     _load_pretrained_weights(backbone, config)
     _freeze_backbone_layers(backbone, config.trainable_layers)
@@ -275,7 +275,7 @@ def build_resnet50_fpn_backbone(config: Optional[ResNetBackboneConfig] = None) -
         2048
     ]
 
-    # Create BackboneWithFPN
+    # Create and return BackboneWithFPN
     backbone_with_fpn = BackboneWithFPN(
         backbone=backbone,
         return_layers=return_layers,
