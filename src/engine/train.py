@@ -12,12 +12,14 @@ from tqdm import tqdm
 # Import MeanAveragePrecision for mAP evaluation
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 # Import necessary torchvision transforms
-from torchvision import transforms
+from torchvision.transforms import v2 as T
 
 from src.datasets.voc import VOCDataset, collate_fn
 from src.utils.transforms import Compose, ToTensor, RandomHorizontalFlip
 from src.models import build_model, AVAILABLE_MODELS
 from src.utils.common import seed_everything, save_jsonl
+
+import matplotlib.pyplot as plt
 
 
 # HYPERPARAMETERS
@@ -50,12 +52,15 @@ def main():
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_tf = Compose([
-        RandomHorizontalFlip(0.5),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-        ToTensor(),
-        ])
-    val_tf = Compose([ToTensor()])
+    training_transforms = [
+        T.RandomHorizontalFlip(0.5),
+        T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+        T.ToTensor(),
+    ]
+    validation_transforms = [T.ToTensor()]
+
+    train_tf = T.Compose(training_transforms)
+    val_tf = T.Compose(validation_transforms)
 
     # If both use trainval dataset, split it into train and val
     if args.train_set == "trainval" and args.val_set == "trainval":
@@ -127,6 +132,10 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     best_map = -1.0
 
+    training_loss_prog = []
+    validation_loss_prog = []
+    validation_map_prog = []
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         pbar = tqdm(train_loader, ncols=100, desc=f"train[{epoch}/{args.epochs}]")
@@ -169,6 +178,8 @@ def main():
         sched.step()
         avg_loss = loss_sum / len(train_loader)
         save_jsonl([{"epoch": epoch, "loss": avg_loss}], os.path.join(args.output, "logs.jsonl"))
+
+        training_loss_prog.append(avg_loss)
 
         # ===== STUDENT TODO: Implement mAP evaluation =====
         # Hint: Implement validation loop to compute mAP@0.5:
@@ -224,6 +235,18 @@ def main():
         if is_best:
             torch.save(ckpt, os.path.join(args.output, "best.pt"))
         print(f"[epoch {epoch}] avg_loss={avg_loss:.4f}  mAP@0.5={map50:.4f}  best={best_map:.4f}")
+
+        validation_loss_prog.append(avg_loss)
+        validation_map_prog.append(map50)
+    
+    # Plot training progress
+    epochs = range(1, args.epochs + 1)
+    plt.plot(epochs, training_loss_prog, label='Training Loss')
+    plt.plot(epochs, validation_loss_prog, label='Validation Loss')
+    plt.show()
+
+    plt.plot(epochs, validation_map_prog, label='mAP@0.5')
+    plt.show()
 
 
 if __name__ == "__main__":
