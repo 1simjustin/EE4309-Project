@@ -20,10 +20,21 @@ from src.models import build_model, AVAILABLE_MODELS
 from src.utils.common import seed_everything, save_jsonl
 
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
+from sklearn.manifold import TSNE
+from collections import OrderedDict
 
 
 # HYPERPARAMETERS
 ACCUMULATE_STEPS = 1  # Gradient accumulation steps
+
+# VOC class names for t-SNE plot legend
+VOC_CLASSES = (
+    "__background__", "aeroplane", "bicycle", "bird", "boat", "bottle", 
+    "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse", 
+    "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"
+)
 
 def get_args():
     ap = argparse.ArgumentParser()
@@ -45,6 +56,89 @@ def get_args():
     ap.add_argument("--val-subset-size", type=int, default=None)
 
     return ap.parse_args()
+
+
+def visualise_tsne(model, data_loader, device):
+    print("Extracting features for t-SNE visualization...")
+    model.eval()
+    all_features = []
+    all_labels = []
+
+    features_hook = {}
+    def hook_fn(module, input, output):
+        if isinstance(output, torch.Tensor):
+            if output.dim() == 4: # B, C, H, W
+                features = T.functional.adaptive_avg_pool2d(output, (1, 1)).flatten(start_dim=1)
+            elif output.dim() == 3: # B, N, C
+                features = output.mean(dim=1)
+            elif output.dim() == 2: # B, C
+                features = output
+            else:
+                features = output.flatten(start_dim=1)
+        
+        elif isinstance(output, (dict, OrderedDict)):
+            last_key = list(output.keys())[-1]
+            features = output[last_key]
+            features = T.functional.adaptive_avg_pool2d(features, (1, 1)).flatten(start_dim=1)
+
+        else:
+            raise ValueError("Unsupported output type for feature extraction.")
+        
+        features_hook['features'] = features.detach().cpu()
+
+    try:
+        handle = model.backbone.body.register_forward_hook(hook_fn)
+    except AttributeError:
+        print("Model does not have a backbone with body attribute for feature extraction.")
+        return
+    
+    with torch.no_grad():
+        for images, targets in tqdm(data_loader, desc="t-SNE features"):
+            images = [img.to(device) for img in images]
+            model(images)
+            features = features_hook.pop('features')
+            all_features.append(features)
+
+            for t in targets:
+                if len(t['labels']) > 0:
+                    all_labels.extend(t['labels'][0].cpu().item())
+                else:
+                    all_labels.append(0)
+    handle.remove()
+
+    print("Performing t-SNE dimensionality reduction...")
+    all_features = torch.cat(all_features, dim=0).numpy()
+    all_labels = np.array(all_labels)
+    tsne = TSNE(n_components=2, random_state=42)
+    tsne_features = tsne.fit_transform(all_features)
+
+    print("Plotting t-SNE visualization...")
+    num_classes = len(VOC_CLASSES)
+    cmap = plt.get_cmap('tab20', num_classes)
+
+    plt.figure(figsize=(12, 10))
+    scatter = plt.scatter(
+        tsne_features[:, 0],
+        tsne_features[:, 1],
+        c=all_labels,
+        cmap=cmap,
+        alpha=0.7,
+        s=10
+    )
+
+    handles = [
+        mpatches.Patch(color=cmap(i), label=VOC_CLASSES[i]) for i in range(num_classes)
+    ]
+
+    plt.legend(
+        handles=handles,
+        bbox_to_anchor=(1.05, 1),
+        loc='upper left',
+        prop={'size': 9}
+    )
+    plt.title("t-SNE Visualization of Extracted Features")
+    plt.tight_layout()
+    plt.show()
 
 
 def main():
@@ -243,10 +337,35 @@ def main():
     epochs = range(1, args.epochs + 1)
     plt.plot(epochs, training_loss_prog, label='Training Loss')
     plt.plot(epochs, validation_loss_prog, label='Validation Loss')
+    plt.title('Training and Validation Loss over Epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
     plt.show()
 
     plt.plot(epochs, validation_map_prog, label='mAP@0.5')
+    plt.title('Validation mAP@0.5 over Epochs')
+    plt.xlabel('Epochs')
+    plt.ylabel('mAP@0.5')
+    plt.legend()
     plt.show()
+
+    print("Beginning t-SNE visualization...")
+    best_chkpt_path = os.path.join(args.output, "best.pt")
+    if os.path.exists(best_chkpt_path):
+        print("Loading best checkpoint for t-SNE visualization...")
+        try:
+            model = build_model(args.model, num_classes=num_classes)
+            chkpt = torch.load(best_chkpt_path, map_location=device)
+            model.load_state_dict(chkpt["model"])
+            model.to(device)
+            visualise_tsne(model, val_loader, device)
+
+        except Exception as e:
+            print(f"Failed to load best checkpoint for t-SNE visualization: {e}")
+    
+    else:
+        print("Best checkpoint not found, skipping t-SNE visualization.")
 
 
 if __name__ == "__main__":
