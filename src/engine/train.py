@@ -25,6 +25,8 @@ import numpy as np
 from sklearn.manifold import TSNE
 from collections import OrderedDict
 
+from src.models.backbones.vit import ViT
+
 
 # HYPERPARAMETERS
 ACCUMULATE_STEPS = 1  # Gradient accumulation steps
@@ -74,11 +76,18 @@ def visualise_tsne(model, data_loader, device):
         except Exception as e:
             print(f"Feature extraction failed in hook: {e}")
 
-    try:
-        handle = model.backbone.body.register_forward_hook(hook_fn)
-    except AttributeError:
-        print("Model does not have a backbone with body attribute for feature extraction.")
+    vit_module_to_hook = None
+
+    if isinstance(model, ViT):
+        vit_module_to_hook = model
+    elif hasattr(model, 'backbone') and isinstance(model.backbone.body, ViT):
+        vit_module_to_hook = model.backbone.body.net
+
+    if vit_module_to_hook is None:
+        print("No ViT backbone found for feature extraction.")
         return
+
+    handle = vit_module_to_hook.register_forward_hook(hook_fn)
     
     with torch.no_grad():
         for images, targets in tqdm(data_loader, desc="t-SNE features"):
