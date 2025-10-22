@@ -66,25 +66,13 @@ def visualise_tsne(model, data_loader, device):
 
     features_hook = {}
     def hook_fn(module, input, output):
-        if isinstance(output, torch.Tensor):
-            if output.dim() == 4: # B, C, H, W
-                features = T.functional.adaptive_avg_pool2d(output, (1, 1)).flatten(start_dim=1)
-            elif output.dim() == 3: # B, N, C
-                features = output.mean(dim=1)
-            elif output.dim() == 2: # B, C
-                features = output
-            else:
-                features = output.flatten(start_dim=1)
-        
-        elif isinstance(output, (dict, OrderedDict)):
-            last_key = list(output.keys())[-1]
-            features = output[last_key]
-            features = T.functional.adaptive_avg_pool2d(features, (1, 1)).flatten(start_dim=1)
-
-        else:
-            raise ValueError("Unsupported output type for feature extraction.")
-        
-        features_hook['features'] = features.detach().cpu()
+        try:
+            feature_key = module._out_features[0]
+            feature_map = output[feature_key]
+            features = T.functional.adaptive_avg_pool2d(feature_map, (1, 1)).flatten(start_dim=1)
+            features_hook['features'] = features.detach().cpu()
+        except Exception as e:
+            print(f"Feature extraction failed in hook: {e}")
 
     try:
         handle = model.backbone.body.register_forward_hook(hook_fn)
@@ -96,19 +84,38 @@ def visualise_tsne(model, data_loader, device):
         for images, targets in tqdm(data_loader, desc="t-SNE features"):
             images = [img.to(device) for img in images]
             model(images)
-            features = features_hook.pop('features')
-            all_features.append(features)
+            
+            if 'features' in features_hook:
+                all_features.append(features_hook.pop('features'))
+            else:
+                print("No features extracted for this batch.")
+                continue
 
             for t in targets:
                 if len(t['labels']) > 0:
-                    all_labels.extend(t['labels'][0].cpu().item())
+                    all_labels.append(t['labels'][0].cpu().item())
                 else:
-                    all_labels.append(0)
+                    all_labels.append(0)  # Background class if no labels
     handle.remove()
+
+    if not all_features:
+        print("No features were extracted, skipping t-SNE visualization.")
+        return
 
     print("Performing t-SNE dimensionality reduction...")
     all_features = torch.cat(all_features, dim=0).numpy()
     all_labels = np.array(all_labels)
+
+    if not np.isfinite(all_features).all():
+        print("Warning: Non-finite values found in features.")
+        finite_mask = np.isfinite(all_features).all(axis=1)
+        all_features = all_features[finite_mask]
+        all_labels = all_labels[finite_mask]
+
+    if len(all_features) == 0:
+        print("No valid features available after filtering, skipping t-SNE visualization.")
+        return
+
     tsne = TSNE(n_components=2, random_state=42)
     tsne_features = tsne.fit_transform(all_features)
 
@@ -138,7 +145,8 @@ def visualise_tsne(model, data_loader, device):
     )
     plt.title("t-SNE Visualization of Extracted Features")
     plt.tight_layout()
-    plt.show()
+    plt.savefig("tsne_voc_features.png")
+    plt.close()
 
 
 def main():
@@ -341,14 +349,16 @@ def main():
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.legend()
-    plt.show()
+    plt.savefig("loss_progress.png")
+    plt.close()
 
     plt.plot(epochs, validation_map_prog, label='mAP@0.5')
     plt.title('Validation mAP@0.5 over Epochs')
     plt.xlabel('Epochs')
     plt.ylabel('mAP@0.5')
     plt.legend()
-    plt.show()
+    plt.savefig("map_progress.png")
+    plt.close()
 
     print("Beginning t-SNE visualization...")
     best_chkpt_path = os.path.join(args.output, "best.pt")
