@@ -1,42 +1,61 @@
 # -*- coding: utf-8 -*-
-import os, argparse, time
+import argparse
+import os
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict
+
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from sklearn.manifold import TSNE
+from src.datasets.voc import VOCDataset, collate_fn
+from src.models import AVAILABLE_MODELS, build_model
+from src.models.backbones.vit import ViT
+from src.utils.common import save_jsonl, seed_everything
+from src.utils.transforms import Compose, RandomHorizontalFlip, ToTensor
+from torch.cuda.amp import GradScaler, autocast
 from torch.optim import SGD, AdamW
-from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
-from torch.cuda.amp import autocast, GradScaler
-from tqdm import tqdm
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.utils.data import DataLoader
 
 # Import MeanAveragePrecision for mAP evaluation
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+
 # Import necessary torchvision transforms
 from torchvision.transforms import v2 as T
-
-from src.datasets.voc import VOCDataset, collate_fn
-from src.utils.transforms import Compose, ToTensor, RandomHorizontalFlip
-from src.models import build_model, AVAILABLE_MODELS
-from src.utils.common import seed_everything, save_jsonl
-
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import numpy as np
-from sklearn.manifold import TSNE
-from collections import OrderedDict
-
-from src.models.backbones.vit import ViT
-
+from tqdm import tqdm
 
 # HYPERPARAMETERS
 ACCUMULATE_STEPS = 1  # Gradient accumulation steps
 
 # VOC class names for t-SNE plot legend
 VOC_CLASSES = (
-    "__background__", "aeroplane", "bicycle", "bird", "boat", "bottle", 
-    "bus", "car", "cat", "chair", "cow", "diningtable", "dog", "horse", 
-    "motorbike", "person", "pottedplant", "sheep", "sofa", "train", "tvmonitor"
+    "__background__",
+    "aeroplane",
+    "bicycle",
+    "bird",
+    "boat",
+    "bottle",
+    "bus",
+    "car",
+    "cat",
+    "chair",
+    "cow",
+    "diningtable",
+    "dog",
+    "horse",
+    "motorbike",
+    "person",
+    "pottedplant",
+    "sheep",
+    "sofa",
+    "train",
+    "tvmonitor",
 )
+
 
 def get_args():
     ap = argparse.ArgumentParser()
@@ -67,12 +86,15 @@ def visualise_tsne(model, data_loader, device):
     all_labels = []
 
     features_hook = {}
+
     def hook_fn(module, input, output):
         try:
             feature_key = module._out_features[0]
             feature_map = output[feature_key]
-            features = T.functional.adaptive_avg_pool2d(feature_map, (1, 1)).flatten(start_dim=1)
-            features_hook['features'] = features.detach().cpu()
+            features = T.functional.adaptive_avg_pool2d(feature_map, (1, 1)).flatten(
+                start_dim=1
+            )
+            features_hook["features"] = features.detach().cpu()
         except Exception as e:
             print(f"Feature extraction failed in hook: {e}")
 
@@ -80,7 +102,7 @@ def visualise_tsne(model, data_loader, device):
 
     if isinstance(model, ViT):
         vit_module_to_hook = model
-    elif hasattr(model, 'backbone') and isinstance(model.backbone.body, ViT):
+    elif hasattr(model, "backbone") and isinstance(model.backbone.body, ViT):
         vit_module_to_hook = model.backbone.body.net
 
     if vit_module_to_hook is None:
@@ -88,21 +110,21 @@ def visualise_tsne(model, data_loader, device):
         return
 
     handle = vit_module_to_hook.register_forward_hook(hook_fn)
-    
+
     with torch.no_grad():
         for images, targets in tqdm(data_loader, desc="t-SNE features"):
             images = [img.to(device) for img in images]
             model(images)
-            
-            if 'features' in features_hook:
-                all_features.append(features_hook.pop('features'))
+
+            if "features" in features_hook:
+                all_features.append(features_hook.pop("features"))
             else:
                 print("No features extracted for this batch.")
                 continue
 
             for t in targets:
-                if len(t['labels']) > 0:
-                    all_labels.append(t['labels'][0].cpu().item())
+                if len(t["labels"]) > 0:
+                    all_labels.append(t["labels"][0].cpu().item())
                 else:
                     all_labels.append(0)  # Background class if no labels
     handle.remove()
@@ -122,7 +144,9 @@ def visualise_tsne(model, data_loader, device):
         all_labels = all_labels[finite_mask]
 
     if len(all_features) == 0:
-        print("No valid features available after filtering, skipping t-SNE visualization.")
+        print(
+            "No valid features available after filtering, skipping t-SNE visualization."
+        )
         return
 
     tsne = TSNE(n_components=2, random_state=42)
@@ -130,7 +154,7 @@ def visualise_tsne(model, data_loader, device):
 
     print("Plotting t-SNE visualization...")
     num_classes = len(VOC_CLASSES)
-    cmap = plt.get_cmap('tab20', num_classes)
+    cmap = plt.get_cmap("tab20", num_classes)
 
     plt.figure(figsize=(12, 10))
     scatter = plt.scatter(
@@ -139,7 +163,7 @@ def visualise_tsne(model, data_loader, device):
         c=all_labels,
         cmap=cmap,
         alpha=0.7,
-        s=10
+        s=10,
     )
 
     handles = [
@@ -147,10 +171,7 @@ def visualise_tsne(model, data_loader, device):
     ]
 
     plt.legend(
-        handles=handles,
-        bbox_to_anchor=(1.05, 1),
-        loc='upper left',
-        prop={'size': 9}
+        handles=handles, bbox_to_anchor=(1.05, 1), loc="upper left", prop={"size": 9}
     )
     plt.title("t-SNE Visualization of Extracted Features")
     plt.tight_layout()
@@ -182,8 +203,14 @@ def main():
         # Calculate split point (80% train, 20% val)
         if args.train_subset_size or args.val_subset_size:
             # Use specified subset sizes with bounds checking
-            train_size = args.train_subset_size if args.train_subset_size else int(0.8 * total_size)
-            val_size = args.val_subset_size if args.val_subset_size else int(0.2 * total_size)
+            train_size = (
+                args.train_subset_size
+                if args.train_subset_size
+                else int(0.8 * total_size)
+            )
+            val_size = (
+                args.val_subset_size if args.val_subset_size else int(0.2 * total_size)
+            )
 
             end_train = min(train_size, total_size)
             end_val = min(end_train + val_size, total_size)
@@ -215,9 +242,19 @@ def main():
         else:
             val_set = base_val
     train_loader = DataLoader(
-        train_set, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn
+        train_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
     )
-    val_loader = DataLoader(val_set, batch_size=1, shuffle=False, num_workers=args.num_workers, collate_fn=collate_fn)
+    val_loader = DataLoader(
+        val_set,
+        batch_size=1,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+    )
 
     # Resolve default output directory after parsing to depend on the model name.
     output_dir = args.output or f"runs/{args.model}_voc07"
@@ -263,7 +300,7 @@ def main():
             # 3. Sum all losses from the loss dictionary
             # 4. Backward pass: scale losses, compute gradients, step optimizer
             # 5. Update scaler for mixed precision training
-            
+
             # Load images and targets to device
             images = [img.to(device) for img in images]
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -288,7 +325,10 @@ def main():
 
         sched.step()
         avg_loss = loss_sum / len(train_loader)
-        save_jsonl([{"epoch": epoch, "loss": avg_loss}], os.path.join(args.output, "logs.jsonl"))
+        save_jsonl(
+            [{"epoch": epoch, "loss": avg_loss}],
+            os.path.join(args.output, "logs.jsonl"),
+        )
 
         training_loss_prog.append(avg_loss)
 
@@ -306,12 +346,16 @@ def main():
         # MeanAveragePrecision is imported at the top of the file
         try:
             # Initialise model and set model to eval mode
-            metric = MeanAveragePrecision(iou_type="bbox", iou_thresholds=[0.5], class_metrics=False).to(device)
+            metric = MeanAveragePrecision(
+                iou_type="bbox", iou_thresholds=[0.5], class_metrics=False
+            ).to(device)
             model.eval()
 
             with torch.no_grad():
                 # Iterate through validation data
-                for images, targets in tqdm(val_loader, desc=f"val[{epoch}/{args.epochs}]"):
+                for images, targets in tqdm(
+                    val_loader, desc=f"val[{epoch}/{args.epochs}]"
+                ):
                     # Move images and targets to device
                     images = [img.to(device) for img in images]
                     targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -324,7 +368,7 @@ def main():
             # Compute final mAP and extract map@0.5
             results = metric.compute()
             map50 = results["map_50"].item()
-        
+
         except Exception as e:
             # Handle exceptions gracefully
             print(f"mAP evaluation failed: {e}")
@@ -345,26 +389,28 @@ def main():
         torch.save(ckpt, os.path.join(args.output, "last.pt"))
         if is_best:
             torch.save(ckpt, os.path.join(args.output, "best.pt"))
-        print(f"[epoch {epoch}] avg_loss={avg_loss:.4f}  mAP@0.5={map50:.4f}  best={best_map:.4f}")
+        print(
+            f"[epoch {epoch}] avg_loss={avg_loss:.4f}  mAP@0.5={map50:.4f}  best={best_map:.4f}"
+        )
 
         validation_loss_prog.append(avg_loss)
         validation_map_prog.append(map50)
-    
+
     # Plot training progress
     epochs = range(1, args.epochs + 1)
-    plt.plot(epochs, training_loss_prog, label='Training Loss')
-    plt.plot(epochs, validation_loss_prog, label='Validation Loss')
-    plt.title('Training and Validation Loss over Epochs')
-    plt.xlabel('Epochs')
-    plt.ylabel('Loss')
+    plt.plot(epochs, training_loss_prog, label="Training Loss")
+    plt.plot(epochs, validation_loss_prog, label="Validation Loss")
+    plt.title("Training and Validation Loss over Epochs")
+    plt.xlabel("Epochs")
+    plt.ylabel("Loss")
     plt.legend()
     plt.savefig("loss_progress.png")
     plt.close()
 
-    plt.plot(epochs, validation_map_prog, label='mAP@0.5')
-    plt.title('Validation mAP@0.5 over Epochs')
-    plt.xlabel('Epochs')
-    plt.ylabel('mAP@0.5')
+    plt.plot(epochs, validation_map_prog, label="mAP@0.5")
+    plt.title("Validation mAP@0.5 over Epochs")
+    plt.xlabel("Epochs")
+    plt.ylabel("mAP@0.5")
     plt.legend()
     plt.savefig("map_progress.png")
     plt.close()
@@ -382,7 +428,7 @@ def main():
 
         except Exception as e:
             print(f"Failed to load best checkpoint for t-SNE visualization: {e}")
-    
+
     else:
         print("Best checkpoint not found, skipping t-SNE visualization.")
 
