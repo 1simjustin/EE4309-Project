@@ -313,6 +313,10 @@ def main():
             # Sum losses, perform backward pass and update scaler
             scaler.scale(losses).backward()
 
+            # Clip gradients to prevent explosion
+            scaler.unscale_(optim)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+
             # Perform Gradient Accumulation
             if (pbar.n + 1) % ACCUMULATE_STEPS == 0:
                 scaler.step(optim)
